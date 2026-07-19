@@ -39,7 +39,7 @@ end
 local Config = {
     -- Core
     Enabled       = false,
-    AimKey        = Enum.UserInputType.MouseButton2, -- Hold RMB to aim
+    AimKey        = Enum.UserInputType.MouseButton1, -- Hold LMB to aim
     ToggleKey     = Enum.KeyCode.F,                  -- Toggle aimbot
     LockToggleKey = Enum.KeyCode.G,                  -- Toggle target lock
     PanicKey      = Enum.KeyCode.Delete,             -- Kill switch
@@ -592,7 +592,7 @@ local infoFPS = makeInfoRow("FPS", "—")
 -- === KEYBIND DISPLAY ===
 makeSection("Keybinds")
 local keybindData = {
-    {"Hold Aim", "RMB"},
+    {"Hold Aim", "LMB"},
     {"Toggle", "F"},
     {"Lock", "G"},
     {"FOV ±", "[ / ]"},
@@ -656,21 +656,43 @@ local function getBonePart(character)
     return nil
 end
 -- Check if a player is valid target
+-- This is the HARDENED version — multiple checks to avoid locking
+-- onto dead bodies, despawned characters, or ragdolls on the ground
 local function isValidTarget(player)
     if player == LocalPlayer then return false end
     if not player.Character then return false end
     local char = player.Character
+    
+    -- Character must be parented to workspace (not nil = despawned/removing)
+    if not char.Parent then return false end
+    if not char:IsDescendantOf(workspace) then return false end
     local humanoid = char:FindFirstChildOfClass("Humanoid")
     if not humanoid then return false end
-    -- Alive check
-    if Config.AliveCheck and humanoid.Health <= 0 then return false end
+    -- === ALIVE CHECKS (this is why it was locking to ground) ===
+    -- Check 1: Health must be above 0
+    if humanoid.Health <= 0 then return false end
+    
+    -- Check 2: Humanoid state — reject Dead state explicitly
+    -- Arsenal sets state to Dead before removing the character
+    local state = humanoid:GetState()
+    if state == Enum.HumanoidStateType.Dead then return false end
+    
+    -- Check 3: Head/bone Y-position sanity
+    -- Dead ragdolls fall through the map or sink into the ground
+    -- If the target bone is below Y = -10, they're gone
+    local bone = getBonePart(char)
+    if not bone then return false end
+    if bone.Position.Y < -10 then return false end
+    
+    -- Check 4: HumanoidRootPart must exist and be reasonably positioned
+    -- When a character dies in Arsenal, the rootpart often gets destroyed
+    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return false end
+    if rootPart.Position.Y < -10 then return false end
     -- Team check
     if Config.TeamCheck and player.Team and player.Team == LocalPlayer.Team then
         return false
     end
-    -- Bone existence
-    local bone = getBonePart(char)
-    if not bone then return false end
     return true
 end
 -- Get screen position and distance from crosshair to a world position
