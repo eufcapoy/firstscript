@@ -1,1 +1,1 @@
-# firstscript
+For Educational Purpose Only
