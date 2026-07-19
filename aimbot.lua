@@ -70,6 +70,18 @@ local Config = {
     TeamCheck     = false,
     AliveCheck    = true,
     WallCheck     = false,  -- Raycast visibility check (perf cost)
+    -- ESP
+    ESP_Enabled   = false,
+    ESP_Boxes     = true,
+    ESP_Names     = true,
+    ESP_Health    = true,
+    ESP_Distance  = true,
+    ESP_Tracers   = false,
+    ESP_ToggleKey = Enum.KeyCode.J,
+    ESP_BoxColor  = Color3.fromRGB(108, 92, 231),  -- Purple to match theme
+    ESP_NameColor = Color3.fromRGB(220, 220, 235),
+    ESP_TracerColor = Color3.fromRGB(108, 92, 231),
+    ESP_TracerOrigin = "Bottom", -- "Bottom", "Center", "Mouse"
     -- UI
     UIVisible     = true,
 }
@@ -584,6 +596,26 @@ end)
 local toggleWallCheck = makeToggle("Wall Check", Config.WallCheck, function(state)
     Config.WallCheck = state
 end)
+-- === ESP SECTION ===
+makeSection("ESP / Wallhack")
+local toggleESP = makeToggle("ESP Enabled", Config.ESP_Enabled, function(state)
+    Config.ESP_Enabled = state
+end)
+local toggleESPBoxes = makeToggle("Boxes", Config.ESP_Boxes, function(state)
+    Config.ESP_Boxes = state
+end)
+local toggleESPNames = makeToggle("Names", Config.ESP_Names, function(state)
+    Config.ESP_Names = state
+end)
+local toggleESPHealth = makeToggle("Health Bars", Config.ESP_Health, function(state)
+    Config.ESP_Health = state
+end)
+local toggleESPDistance = makeToggle("Distance", Config.ESP_Distance, function(state)
+    Config.ESP_Distance = state
+end)
+local toggleESPTracers = makeToggle("Tracers", Config.ESP_Tracers, function(state)
+    Config.ESP_Tracers = state
+end)
 -- === INFO SECTION ===
 makeSection("Info")
 local infoTarget = makeInfoRow("Locked On", "None")
@@ -599,6 +631,7 @@ local keybindData = {
     {"Smooth ±", "- / ="},
     {"Bone", "T"},
     {"FOV Circle", "H"},
+    {"ESP Toggle", "J"},
     {"Panic/Kill", "DEL"},
 }
 for _, kb in ipairs(keybindData) do
@@ -635,6 +668,234 @@ pcall(function()
         FOVCircle.NumSides = 64
     end
 end)
+---------------------------------------------------------------------------
+-- ESP SYSTEM (Drawing API)
+---------------------------------------------------------------------------
+local ESPObjects = {} -- { [player] = { box, nameTag, healthBarBG, healthBarFill, distTag, tracer } }
+-- Create ESP drawing objects for a player
+local function createESP(player)
+    if ESPObjects[player] then return end
+    
+    local success, drawings = pcall(function()
+        local box = Drawing.new("Square")
+        box.Color = Config.ESP_BoxColor
+        box.Thickness = 1.5
+        box.Filled = false
+        box.Transparency = 0.8
+        box.Visible = false
+        
+        local nameTag = Drawing.new("Text")
+        nameTag.Color = Config.ESP_NameColor
+        nameTag.Size = 13
+        nameTag.Center = true
+        nameTag.Outline = true
+        nameTag.OutlineColor = Color3.fromRGB(0, 0, 0)
+        nameTag.Font = 2 -- Plex (cleaner than default)
+        nameTag.Visible = false
+        nameTag.Text = player.DisplayName or player.Name
+        
+        local healthBG = Drawing.new("Square")
+        healthBG.Color = Color3.fromRGB(40, 40, 40)
+        healthBG.Thickness = 1
+        healthBG.Filled = true
+        healthBG.Transparency = 0.6
+        healthBG.Visible = false
+        
+        local healthFill = Drawing.new("Square")
+        healthFill.Color = Color3.fromRGB(46, 213, 115)
+        healthFill.Thickness = 1
+        healthFill.Filled = true
+        healthFill.Transparency = 0.8
+        healthFill.Visible = false
+        
+        local distTag = Drawing.new("Text")
+        distTag.Color = Config.ESP_NameColor
+        distTag.Size = 11
+        distTag.Center = true
+        distTag.Outline = true
+        distTag.OutlineColor = Color3.fromRGB(0, 0, 0)
+        distTag.Font = 2
+        distTag.Visible = false
+        
+        local tracer = Drawing.new("Line")
+        tracer.Color = Config.ESP_TracerColor
+        tracer.Thickness = 1.5
+        tracer.Transparency = 0.6
+        tracer.Visible = false
+        
+        return {
+            box = box,
+            nameTag = nameTag,
+            healthBG = healthBG,
+            healthFill = healthFill,
+            distTag = distTag,
+            tracer = tracer,
+        }
+    end)
+    
+    if success then
+        ESPObjects[player] = drawings
+    end
+end
+-- Remove ESP drawings for a player
+local function removeESP(player)
+    local data = ESPObjects[player]
+    if not data then return end
+    pcall(function()
+        for _, drawing in pairs(data) do
+            drawing:Remove()
+        end
+    end)
+    ESPObjects[player] = nil
+end
+-- Remove ALL ESP drawings
+local function clearAllESP()
+    for player, _ in pairs(ESPObjects) do
+        removeESP(player)
+    end
+    ESPObjects = {}
+end
+-- Update ESP for a single player
+local function updateESP(player, cam)
+    local data = ESPObjects[player]
+    if not data then return end
+    
+    -- Hide everything by default
+    local function hideAll()
+        for _, d in pairs(data) do
+            d.Visible = false
+        end
+    end
+    
+    -- Not a valid target? Hide ESP
+    if player == LocalPlayer then hideAll() return end
+    if not player.Character then hideAll() return end
+    
+    local char = player.Character
+    if not char.Parent then hideAll() return end
+    
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then hideAll() return end
+    if humanoid.Health <= 0 then hideAll() return end
+    
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then hideAll() return end
+    
+    local head = char:FindFirstChild("Head", true)
+    if not head or not head:IsA("BasePart") then hideAll() return end
+    
+    -- Team check
+    if Config.TeamCheck and player.Team and player.Team == LocalPlayer.Team then
+        hideAll()
+        return
+    end
+    
+    -- Get screen positions for bounding box
+    -- Use character height to estimate 2D box
+    local rootPos = hrp.Position
+    local headPos = head.Position
+    
+    local screenRoot, onScreenRoot = cam:WorldToViewportPoint(rootPos)
+    if not onScreenRoot then hideAll() return end
+    
+    local screenHead, _ = cam:WorldToViewportPoint(headPos + Vector3.new(0, 1.5, 0))
+    local screenFeet, _ = cam:WorldToViewportPoint(rootPos - Vector3.new(0, 3, 0))
+    
+    local boxHeight = math.abs(screenFeet.Y - screenHead.Y)
+    local boxWidth = boxHeight * 0.55
+    local boxCenterX = screenRoot.X
+    local boxTopY = screenHead.Y
+    
+    -- Distance from camera
+    local distance = (rootPos - cam.CFrame.Position).Magnitude
+    
+    -- === BOX ===
+    if Config.ESP_Boxes then
+        data.box.Size = Vector2.new(boxWidth, boxHeight)
+        data.box.Position = Vector2.new(boxCenterX - boxWidth / 2, boxTopY)
+        data.box.Color = Config.ESP_BoxColor
+        data.box.Visible = true
+    else
+        data.box.Visible = false
+    end
+    
+    -- === NAME TAG === (above box)
+    if Config.ESP_Names then
+        data.nameTag.Text = player.DisplayName or player.Name
+        data.nameTag.Position = Vector2.new(boxCenterX, boxTopY - 16)
+        data.nameTag.Visible = true
+    else
+        data.nameTag.Visible = false
+    end
+    
+    -- === HEALTH BAR === (left side of box)
+    if Config.ESP_Health then
+        local healthPct = math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
+        local barWidth = 3
+        local barX = boxCenterX - boxWidth / 2 - barWidth - 3
+        local barHeight = boxHeight
+        local fillHeight = barHeight * healthPct
+        
+        -- Background
+        data.healthBG.Size = Vector2.new(barWidth, barHeight)
+        data.healthBG.Position = Vector2.new(barX, boxTopY)
+        data.healthBG.Visible = true
+        
+        -- Fill (from bottom up)
+        data.healthFill.Size = Vector2.new(barWidth, fillHeight)
+        data.healthFill.Position = Vector2.new(barX, boxTopY + (barHeight - fillHeight))
+        -- Color gradient: green > yellow > red based on health
+        if healthPct > 0.6 then
+            data.healthFill.Color = Color3.fromRGB(46, 213, 115)
+        elseif healthPct > 0.3 then
+            data.healthFill.Color = Color3.fromRGB(255, 195, 18)
+        else
+            data.healthFill.Color = Color3.fromRGB(255, 71, 87)
+        end
+        data.healthFill.Visible = true
+    else
+        data.healthBG.Visible = false
+        data.healthFill.Visible = false
+    end
+    
+    -- === DISTANCE TAG === (below box)
+    if Config.ESP_Distance then
+        data.distTag.Text = string.format("[%d studs]", math.floor(distance))
+        data.distTag.Position = Vector2.new(boxCenterX, boxTopY + boxHeight + 3)
+        data.distTag.Visible = true
+    else
+        data.distTag.Visible = false
+    end
+    
+    -- === TRACER === (line from screen bottom to player feet)
+    if Config.ESP_Tracers then
+        local fromPos = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y)
+        local toPos = Vector2.new(screenRoot.X, screenRoot.Y)
+        data.tracer.From = fromPos
+        data.tracer.To = toPos
+        data.tracer.Color = Config.ESP_TracerColor
+        data.tracer.Visible = true
+    else
+        data.tracer.Visible = false
+    end
+end
+-- Auto-create ESP for new players, clean up leaving players
+Players.PlayerAdded:Connect(function(player)
+    if Drawing then
+        pcall(function() createESP(player) end)
+    end
+end)
+Players.PlayerRemoving:Connect(function(player)
+    removeESP(player)
+end)
+-- Initialize ESP for all current players
+if Drawing then
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            pcall(function() createESP(player) end)
+        end
+    end
+end
 ---------------------------------------------------------------------------
 -- AIMBOT CORE
 ---------------------------------------------------------------------------
@@ -831,9 +1092,16 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         Config.FOVVisible = not Config.FOVVisible
         toggleFOVCircle.setState(Config.FOVVisible)
     end
+    -- ESP toggle
+    if input.KeyCode == Config.ESP_ToggleKey then
+        Config.ESP_Enabled = not Config.ESP_Enabled
+        toggleESP.setState(Config.ESP_Enabled)
+    end
     -- Panic key — destroy everything
     if input.KeyCode == Config.PanicKey then
         Config.Enabled = false
+        Config.ESP_Enabled = false
+        clearAllESP()
         if FOVCircle then pcall(function() FOVCircle:Remove() end) end
         ScreenGui:Destroy()
         return
@@ -879,6 +1147,25 @@ RunService:BindToRenderStep(RENDER_NAME, 201, function()
         FOVCircle.Radius = Config.FOV
         FOVCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
     end
+    -- === ESP UPDATE ===
+    if Config.ESP_Enabled and cam then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                -- Ensure ESP objects exist
+                if not ESPObjects[player] and Drawing then
+                    pcall(function() createESP(player) end)
+                end
+                updateESP(player, cam)
+            end
+        end
+    else
+        -- ESP disabled: hide all drawings
+        for player, data in pairs(ESPObjects) do
+            for _, d in pairs(data) do
+                d.Visible = false
+            end
+        end
+    end
     -- Aimbot logic
     if not Config.Enabled then return end
     if not aimHeld then return end
@@ -922,6 +1209,14 @@ LocalPlayer.CharacterAdded:Connect(function()
     Config.LockedTarget = nil
     infoTarget.setValue("None")
     infoDistance.setValue("—")
+    -- Re-init ESP objects (in case Drawing refs broke)
+    if Drawing and Config.ESP_Enabled then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and not ESPObjects[player] then
+                pcall(function() createESP(player) end)
+            end
+        end
+    end
 end)
 ---------------------------------------------------------------------------
 -- STARTUP NOTIFICATION
@@ -936,6 +1231,6 @@ if game.StarterGui then
         })
     end)
 end
-print("[CROSSHAIR LOCK] v2.2 loaded — mousemoverel mode")
-print("[CROSSHAIR LOCK] Press F to toggle | DEL to destroy")
-print("[CROSSHAIR LOCK] Aim method: mousemoverel (game-compatible)")
+print("[CROSSHAIR LOCK] v2.3 loaded — aimbot + ESP")
+print("[CROSSHAIR LOCK] Press F = aimbot | J = ESP | DEL = destroy")
+print("[CROSSHAIR LOCK] Aim: mousemoverel | ESP: Drawing API")
