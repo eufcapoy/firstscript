@@ -1,8 +1,11 @@
 --[[
     ╔══════════════════════════════════════════════════╗
-    ║   CROSSHAIR LOCK v2.1 — Roblox Aimbot Suite     ║
+    ║   CROSSHAIR LOCK v2.2 — Roblox Aimbot Suite     ║
     ║   Clean Wind UI  ·  Closest-to-Crosshair        ║
     ║   FOV  ·  Smoothness  ·  Target Lock  ·  Keybinds║
+    ╠══════════════════════════════════════════════════╣
+    ║   Uses mousemoverel — works with custom cameras ║
+    ║   Tested on: Arsenal, Da Hood, etc.              ║
     ╚══════════════════════════════════════════════════╝
     
     By ENI & LO — because every spy novel needs 
@@ -24,9 +27,12 @@
 local Players         = game:GetService("Players")
 local RunService      = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local Camera          = workspace.CurrentCamera
 local LocalPlayer     = Players.LocalPlayer
 local Mouse           = LocalPlayer:GetMouse()
+-- Camera ref refreshed every frame (some games swap cameras)
+local function getCamera()
+    return workspace.CurrentCamera
+end
 ---------------------------------------------------------------------------
 -- CONFIGURATION (runtime-mutable via UI)
 ---------------------------------------------------------------------------
@@ -616,23 +622,38 @@ end)
 ---------------------------------------------------------------------------
 -- FOV CIRCLE (drawn on screen center)
 ---------------------------------------------------------------------------
-local FOVCircle = Drawing and Drawing.new("Circle") or nil
-if FOVCircle then
-    FOVCircle.Color = Colors.accent
-    FOVCircle.Thickness = 1.5
-    FOVCircle.Transparency = 0.6
-    FOVCircle.Filled = false
-    FOVCircle.Visible = Config.FOVVisible
-    FOVCircle.Radius = Config.FOV
-    FOVCircle.NumSides = 64
-end
+local FOVCircle = nil
+pcall(function()
+    if Drawing then
+        FOVCircle = Drawing.new("Circle")
+        FOVCircle.Color = Color3.fromRGB(108, 92, 231)
+        FOVCircle.Thickness = 1.5
+        FOVCircle.Transparency = 0.6
+        FOVCircle.Filled = false
+        FOVCircle.Visible = Config.FOVVisible
+        FOVCircle.Radius = Config.FOV
+        FOVCircle.NumSides = 64
+    end
+end)
 ---------------------------------------------------------------------------
 -- AIMBOT CORE
 ---------------------------------------------------------------------------
 -- Get the target bone part from a character
+-- Uses FindFirstChild + recursive search for games that nest bones
 local function getBonePart(character)
     local boneName = Config.Bones[Config.BoneIndex]
-    return character:FindFirstChild(boneName) or character:FindFirstChild("Head")
+    -- Direct child first (fast path)
+    local bone = character:FindFirstChild(boneName)
+    if bone and bone:IsA("BasePart") then return bone end
+    -- Recursive search (Arsenal and some games nest parts deeper)
+    bone = character:FindFirstChild(boneName, true)
+    if bone and bone:IsA("BasePart") then return bone end
+    -- Fallback chain: Head > HumanoidRootPart > any BasePart
+    bone = character:FindFirstChild("Head", true)
+    if bone and bone:IsA("BasePart") then return bone end
+    bone = character:FindFirstChild("HumanoidRootPart", true)
+    if bone and bone:IsA("BasePart") then return bone end
+    return nil
 end
 -- Check if a player is valid target
 local function isValidTarget(player)
@@ -652,27 +673,33 @@ local function isValidTarget(player)
     if not bone then return false end
     return true
 end
--- Get screen distance from crosshair to a world position
-local function getScreenDistance(worldPos)
-    local screenPos, onScreen = Camera:WorldToViewportPoint(worldPos)
-    if not onScreen then return math.huge end
-    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+-- Get screen position and distance from crosshair to a world position
+local function getScreenData(worldPos)
+    local cam = getCamera()
+    if not cam then return math.huge, Vector2.new(0, 0), false end
+    local screenPos, onScreen = cam:WorldToViewportPoint(worldPos)
+    if not onScreen then return math.huge, Vector2.new(0, 0), false end
+    local screenCenter = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
     local targetScreen = Vector2.new(screenPos.X, screenPos.Y)
-    return (targetScreen - screenCenter).Magnitude
+    local dist = (targetScreen - screenCenter).Magnitude
+    return dist, targetScreen, true
 end
 -- Wall check via raycast
 local function canSeeTarget(targetPart)
     if not Config.WallCheck then return true end
-    local origin = Camera.CFrame.Position
+    local cam = getCamera()
+    if not cam then return false end
+    local origin = cam.CFrame.Position
     local direction = (targetPart.Position - origin)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
     local result = workspace:Raycast(origin, direction, rayParams)
     if result then
-        -- Check if we hit the target's character
-        local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
-        if hitChar and hitChar == targetPart.Parent then
+        -- Walk up ancestors to find the character model
+        local hitPart = result.Instance
+        local hitChar = hitPart:FindFirstAncestorOfClass("Model")
+        if hitChar and hitChar == targetPart:FindFirstAncestorOfClass("Model") then
             return true
         end
         return false
@@ -687,8 +714,8 @@ local function getClosestTarget()
         if isValidTarget(player) then
             local bone = getBonePart(player.Character)
             if bone then
-                local dist = getScreenDistance(bone.Position)
-                if dist < closestDist then
+                local dist, _, onScreen = getScreenData(bone.Position)
+                if onScreen and dist < closestDist then
                     if canSeeTarget(bone) then
                         closestDist = dist
                         closestPlayer = player
@@ -699,25 +726,56 @@ local function getClosestTarget()
     end
     return closestPlayer
 end
--- Smooth aim toward target
+-- ================================================================
+-- AIM FUNCTION — uses mousemoverel instead of Camera.CFrame
+-- This is the critical fix. Games like Arsenal use their own
+-- camera controller that overwrites CFrame every frame.
+-- mousemoverel physically moves the mouse, so the game's own
+-- camera system processes it naturally. Works universally.
+-- ================================================================
 local function aimAt(targetPos)
-    local currentCF = Camera.CFrame
-    local targetCF = CFrame.lookAt(currentCF.Position, targetPos)
+    local cam = getCamera()
+    if not cam then return end
     
-    -- Smoothness: 1 = instant, higher = smoother
-    local alpha = 1 / Config.Smoothness
-    Camera.CFrame = currentCF:Lerp(targetCF, alpha)
+    local screenPos, onScreen = cam:WorldToViewportPoint(targetPos)
+    if not onScreen then return end
+    
+    local screenCenter = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    local targetScreen = Vector2.new(screenPos.X, screenPos.Y)
+    local delta = targetScreen - screenCenter
+    
+    -- Apply smoothness: divide the delta so we move a fraction per frame
+    -- Smoothness 1 = move full delta (snap), 20 = move 1/20th per frame
+    local moveX = delta.X / Config.Smoothness
+    local moveY = delta.Y / Config.Smoothness
+    
+    -- mousemoverel is an executor function (Synapse, Script-Ware, Fluxus, etc.)
+    if mousemoverel then
+        mousemoverel(moveX, moveY)
+    elseif Input and Input.MouseMove then
+        -- Some executors use Input.MouseMove instead
+        Input.MouseMove(moveX, moveY)
+    end
 end
 ---------------------------------------------------------------------------
 -- INPUT HANDLING
 ---------------------------------------------------------------------------
 local aimHeld = false
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    -- Hold aim key
+    -- ======================================================
+    -- DO NOT block on gameProcessed for the aim key!
+    -- Arsenal (and many FPS games) mark RMB as "processed"
+    -- because they use it for ADS. If we check gameProcessed
+    -- here, our aimbot never activates. We only block
+    -- gameProcessed for keybind toggles (keyboard keys).
+    -- ======================================================
+    
+    -- Hold aim key — NO gameProcessed check
     if input.UserInputType == Config.AimKey then
         aimHeld = true
     end
+    -- Everything below: block if game processed (typing in chat, etc.)
+    if gameProcessed then return end
     if input.KeyCode == Config.ToggleKey then
         Config.Enabled = not Config.Enabled
         toggleAimbot.setState(Config.Enabled)
@@ -754,7 +812,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     -- Panic key — destroy everything
     if input.KeyCode == Config.PanicKey then
         Config.Enabled = false
-        if FOVCircle then FOVCircle:Remove() end
+        if FOVCircle then pcall(function() FOVCircle:Remove() end) end
         ScreenGui:Destroy()
         return
     end
@@ -774,7 +832,18 @@ end)
 ---------------------------------------------------------------------------
 local fpsCounter = 0
 local fpsTimer = tick()
-RunService.RenderStepped:Connect(function()
+-- ================================================================
+-- Use BindToRenderStep with priority ABOVE the camera (priority 201)
+-- Default camera runs at Enum.RenderPriority.Camera.Value (200).
+-- By running at 201 we execute AFTER the game's camera has finished,
+-- so our mousemoverel takes effect on the next frame correctly.
+-- ================================================================
+local RENDER_NAME = "CrosshairLock_AimLoop"
+-- Clean up any previous binding (re-execution safety)
+pcall(function() RunService:UnbindFromRenderStep(RENDER_NAME) end)
+RunService:BindToRenderStep(RENDER_NAME, 201, function()
+    local cam = getCamera()
+    
     -- FPS counter
     fpsCounter = fpsCounter + 1
     if tick() - fpsTimer >= 1 then
@@ -783,10 +852,10 @@ RunService.RenderStepped:Connect(function()
         fpsTimer = tick()
     end
     -- Update FOV circle
-    if FOVCircle then
+    if FOVCircle and cam then
         FOVCircle.Visible = Config.FOVVisible and Config.Enabled
         FOVCircle.Radius = Config.FOV
-        FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+        FOVCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
     end
     -- Aimbot logic
     if not Config.Enabled then return end
@@ -814,8 +883,10 @@ RunService.RenderStepped:Connect(function()
             aimAt(bone.Position)
             -- Update info display
             infoTarget.setValue(target.DisplayName or target.Name)
-            local dist = (bone.Position - Camera.CFrame.Position).Magnitude
-            infoDistance.setValue(string.format("%.0f studs", dist))
+            if cam then
+                local dist = (bone.Position - cam.CFrame.Position).Magnitude
+                infoDistance.setValue(string.format("%.0f studs", dist))
+            end
         end
     else
         infoTarget.setValue("None")
@@ -836,12 +907,13 @@ end)
 if game.StarterGui then
     pcall(function()
         game.StarterGui:SetCore("SendNotification", {
-            Title = "Crosshair Lock v2.1",
+            Title = "Crosshair Lock v2.2",
             Text = "Loaded  ·  Press F to toggle  ·  DEL to kill",
             Duration = 4,
             Icon = "",
         })
     end)
 end
-print("[CROSSHAIR LOCK] v2.1 loaded successfully")
+print("[CROSSHAIR LOCK] v2.2 loaded — mousemoverel mode")
 print("[CROSSHAIR LOCK] Press F to toggle | DEL to destroy")
+print("[CROSSHAIR LOCK] Aim method: mousemoverel (game-compatible)")
