@@ -1521,10 +1521,17 @@ end
 getgenv().__rwRunLoop = rwRunLoop
 getgenv().__rwRunTest = rwRunLoop
 
+local _logoIcon = nil
+if getcustomasset then
+	pcall(function()
+		_logoIcon = getcustomasset("BHLogo.png")
+	end)
+end
+
 local Window = Library:CreateWindow({
 	Title = "Bang Hub",
 	Footer = "Ryujin Script",
-	Icon = getcustomasset("BHLogo.png"),
+	Icon = _logoIcon,
 	IconSize = UDim2.fromOffset(28, 28),
 	ToggleKeybind = Enum.KeyCode.LeftAlt,
 })
