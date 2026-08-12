@@ -9,14 +9,25 @@ if not Library then error("[ryujin] Obsidian failed to load") end
 -- Standalone fallback for plain execute/execute-file (no live-reload STATE):
 -- keeps STATE.alive() true and collects onCleanup callbacks instead of
 -- indexing nil, which previously killed every refresh loop on line 1.
-if not STATE then
+-- Rebuilds the fallback when a leftover STATE is nil, malformed, or dead
+-- (e.g. a previous plain run that was shut down), so re-running always works.
+-- alive/onCleanup must NOT rely on a `self` argument: some executors call
+-- them bare (STATE.alive extracted and invoked without the table), which
+-- crashed `self._alive` and silently killed every loop in full view. Both
+-- functions read the captured STATE table directly instead.
+local stateOk = type(STATE) == "table" and type(STATE.alive) == "function" and type(STATE.onCleanup) == "function"
+if stateOk then
+	local ok, alive = pcall(STATE.alive, STATE)
+	stateOk = ok and alive
+end
+if not stateOk then
 	local cleanups = {}
 	STATE = {
 		_alive = true,
-		alive = function(self)
-			return self._alive
+		alive = function()
+			return STATE ~= nil and STATE._alive ~= false
 		end,
-		onCleanup = function(self, fn)
+		onCleanup = function(_, fn)
 			table.insert(cleanups, fn)
 		end,
 	}
