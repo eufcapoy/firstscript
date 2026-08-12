@@ -1,4 +1,3 @@
-
 -- Force Obsidian into PlayerGui to avoid 'lacking capability Plugin' on CoreGui
 local _origGethui = gethui
 local _playerGui = game.Players.LocalPlayer:WaitForChild("PlayerGui", 10)
@@ -6,6 +5,22 @@ gethui = function() return _playerGui end
 local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/refs/heads/main/Library.lua"))()
 gethui = _origGethui
 if not Library then error("[ryujin] Obsidian failed to load") end
+
+-- Standalone fallback for plain execute/execute-file (no live-reload STATE):
+-- keeps STATE.alive() true and collects onCleanup callbacks instead of
+-- indexing nil, which previously killed every refresh loop on line 1.
+if not STATE then
+	local cleanups = {}
+	STATE = {
+		_alive = true,
+		alive = function(self)
+			return self._alive
+		end,
+		onCleanup = function(self, fn)
+			table.insert(cleanups, fn)
+		end,
+	}
+end
 
 local lp = game.Players.LocalPlayer
 local run = game:GetService("RunService")
